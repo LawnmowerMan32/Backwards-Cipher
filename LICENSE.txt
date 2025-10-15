@@ -1,0 +1,18 @@
+Backwards Cipher – Proprietary License  
+© 2025 Dallas Mozader III. All Rights Reserved.
+
+This software and all accompanying source code, designs, and documentation (collectively referred to as “the Software”) are the exclusive property of Dallas Mozader III.
+
+Permission is hereby granted to individuals to use the Software for personal, educational, or non-commercial purposes only.
+
+The following actions are strictly prohibited without the express written consent of Dallas Mozader III:
+  • Copying, modifying, or redistributing the Software for commercial purposes  
+  • Selling or licensing the Software or derivative works  
+  • Using the Software or its derivatives in any product, service, or system intended for profit or monetization  
+  • Removing or altering any copyright notices, attributions, or identifiers contained in the Software
+
+Any unauthorized commercial use, sale, or distribution of this Software constitutes a violation of copyright and intellectual property law, and may result in legal action.
+
+To obtain commercial licensing rights, partnership permissions, or revenue-sharing agreements, contact:  
+**Dallas Mozader III (Owner & Author)**  
+© 2025 All Rights Reserved
