@@ -1,0 +1,305 @@
+
+
+
+"""
+voice_reverse_analyze.py
+
+Small GUI app to:
+- Record audio (start/stop)
+- Save original WAV
+- Create reversed WAV
+- Play original or reversed audio
+- Attempt automatic transcription of reversed audio
+- Detect non-silent segments in reversed audio, try transcribing each,
+  and also reverse each segment back to forward and try transcribing that.
+
+Dependencies:
+    pip install sounddevice scipy numpy soundfile simpleaudio pydub SpeechRecognition PySimpleGUI
+
+Make sure `ffmpeg` is installed for pydub.
+"""
+
+import os
+import io
+import time
+import threading
+from datetime import datetime
+
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+import simpleaudio as sa
+from scipy.io import wavfile
+from pydub import AudioSegment, silence
+import speech_recognition as sr
+import PySimpleGUI as sg
+
+# --------- Config ----------
+SAMPLE_RATE = 44100
+CHANNELS = 1
+RECORD_FILENAME = "recorded_original.wav"
+REVERSED_FILENAME = "recorded_reversed.wav"
+SEGMENTS_DIR = "segments"
+# --------------------------
+
+def record_to_file(filename):
+    """Record until stop_event is set; blocking call handled with threads in UI."""
+    # This function is not used directly in blocking form; we use callback-style recording below.
+    pass
+
+class Recorder:
+    def __init__(self, filename=RECORD_FILENAME, samplerate=SAMPLE_RATE, channels=CHANNELS):
+        self.filename = filename
+        self.samplerate = samplerate
+        self.channels = channels
+        self._recording = False
+        self._frames = []
+
+    def start(self):
+        self._frames = []
+        self._recording = True
+        self._stream = sd.InputStream(samplerate=self.samplerate, channels=self.channels, callback=self.callback)
+        self._stream.start()
+        print("Recording started...")
+
+    def callback(self, indata, frames, time_info, status):
+        if status:
+            print("Recording status:", status)
+        if self._recording:
+            # copy the frame data
+            self._frames.append(indata.copy())
+
+    def stop(self):
+        if not self._recording:
+            return
+        self._recording = False
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        # concatenate frames and write to file
+        audio_data = np.concatenate(self._frames, axis=0)
+        # convert to 16-bit PCM
+        sf.write(self.filename, audio_data, self.samplerate, subtype='PCM_16')
+        print(f"Saved recording to {self.filename}")
+
+def reverse_wav(infile, outfile):
+    """Read infile WAV, reverse samples, save outfile WAV."""
+    samplerate, data = wavfile.read(infile)
+    # handle stereo or mono
+    if data.ndim == 1:
+        rev = data[::-1]
+    else:
+        rev = data[::-1, :]
+    wavfile.write(outfile, samplerate, rev)
+    print(f"Saved reversed audio to {outfile}")
+
+def play_wav_file(path):
+    """Play a wav file using simpleaudio (blocking until done)."""
+    try:
+        wave_obj = sa.WaveObject.from_wave_file(path)
+        play_obj = wave_obj.play()
+        play_obj.wait_done()
+    except Exception as e:
+        print("Playback error:", e)
+
+def transcribe_audio_file(path, use_google=True, language='en-US'):
+    """Attempt transcription using SpeechRecognition (Google Web Speech API).
+       Returns the (success, text or error) tuple.
+    """
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(path) as source:
+            audio = recognizer.record(source)
+        if use_google:
+            # Google Web Speech API (free, has quotas)
+            text = recognizer.recognize_google(audio, language=language)
+        else:
+            # placeholder: you can plug other recognizers here
+            text = recognizer.recognize_google(audio, language=language)
+        return True, text
+    except sr.UnknownValueError:
+        return False, "<unintelligible>"
+    except sr.RequestError as e:
+        return False, f"<API error: {e}>"
+    except Exception as e:
+        return False, f"<error: {e}>"
+
+def detect_and_export_segments(wav_path, out_dir=SEGMENTS_DIR, min_silence_len=300, silence_thresh=-40):
+    """Detect non-silent segments using pydub, export each as wav file.
+       Returns list of (start_ms, end_ms, segment_path)
+    """
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    sound = AudioSegment.from_wav(wav_path)
+    nonsilent_ranges = silence.detect_nonsilent(sound, min_silence_len=min_silence_len, silence_thresh=silence_thresh)
+    exported = []
+    for i, (start, end) in enumerate(nonsilent_ranges):
+        seg = sound[start:end]
+        out_path = os.path.join(out_dir, f"segment_{i+1}_{start}_{end}.wav")
+        seg.export(out_path, format="wav")
+        exported.append((start, end, out_path))
+    return exported
+
+def reverse_segment_file(segment_path, out_path):
+    samplerate, data = wavfile.read(segment_path)
+    if data.ndim == 1:
+        rev = data[::-1]
+    else:
+        rev = data[::-1, :]
+    wavfile.write(out_path, samplerate, rev)
+    return out_path
+
+# ---------- GUI / Threading helpers ----------
+recorder = Recorder()
+
+def threaded(fn):
+    def wrapper(*a, **k):
+        t = threading.Thread(target=fn, args=a, kwargs=k, daemon=True)
+        t.start()
+        return t
+    return wrapper
+
+# ---------- GUI Layout ----------
+sg.theme('DarkBlue3')
+
+layout = [
+    [sg.Text('Randum Voice Reverse & Analyze', font=('Helvetica', 16), justification='center', expand_x=True)],
+    [sg.Button('Start Recording', key='-REC-'), sg.Button('Stop Recording', key='-STOP-', disabled=True),
+     sg.Button('Play Original', key='-PLAY_ORIG-'), sg.Button('Play Reversed', key='-PLAY_REV-')],
+    [sg.Button('Make Reversed File', key='-MAKE_REV-'), sg.Button('Transcribe Reversed (full)', key='-TRANS_REV-'),
+     sg.Button('Detect Segments & Transcribe', key='-SEG_TRANS-')],
+    [sg.Text('Status: '), sg.Text('', key='-STATUS-', size=(60,1))],
+    [sg.Multiline('', size=(80,15), key='-LOG-', autoscroll=True)],
+    [sg.Text('Settings:'), sg.Text(' Silence threshold (dBFS):'), sg.Input('-40', size=(6,1), key='-SIL_THRESH-'),
+     sg.Text('Min silence ms:'), sg.Input('300', size=(6,1), key='-MIN_SIL-')],
+    [sg.Button('Clear Log'), sg.Button('Exit')]
+]
+
+window = sg.Window('Randum VoiceTool', layout, finalize=True)
+
+# ---------- Event Loop ----------
+def log(msg):
+    cur = window['-LOG-'].get()
+    now = datetime.now().strftime('%H:%M:%S')
+    window['-LOG-'].update(cur + f"[{now}] {msg}\n")
+
+@threaded
+def do_play(path, label):
+    window['-STATUS-'].update(f'Playing {label}...')
+    log(f"Playing {path}")
+    try:
+        play_wav_file(path)
+    except Exception as e:
+        log("Playback error: " + str(e))
+    window['-STATUS-'].update('Idle')
+
+@threaded
+def do_transcribe(path, label):
+    window['-STATUS-'].update(f'Transcribing {label} (may take time)...')
+    log(f"Transcribing {path} ...")
+    ok, txt = transcribe_audio_file(path)
+    if ok:
+        log(f"Transcription ({label}): {txt}")
+    else:
+        log(f"Transcription ({label}) failed / result: {txt}")
+    window['-STATUS-'].update('Idle')
+
+@threaded
+def do_segment_transcribe(reversed_path, silence_thresh_db, min_silence):
+    window['-STATUS-'].update('Detecting segments...')
+    log("Detecting non-silent segments in reversed audio...")
+    exported = detect_and_export_segments(reversed_path, out_dir=SEGMENTS_DIR, min_silence_len=int(min_silence), silence_thresh=int(silence_thresh_db))
+    if not exported:
+        log("No non-silent segments detected (parameters may be too strict).")
+        window['-STATUS-'].update('Idle')
+        return
+    log(f"Exported {len(exported)} segments to {SEGMENTS_DIR}")
+    # For each segment: attempt transcription of reversed segment and reversed-back segment
+    for i, (start, end, segpath) in enumerate(exported, start=1):
+        log(f"Segment {i}: {start}ms - {end}ms → {segpath}")
+        # Try transcribing the reversed segment (as-is)
+        ok, txt = transcribe_audio_file(segpath)
+        if ok and txt.strip() != "<unintelligible>":
+            log(f"Transcription reversed-seg #{i}: {txt}")
+        else:
+            log(f"Reversed seg #{i} transcription failed / unintelligible.")
+        # Now reverse the segment back to forward and transcribe
+        revback_path = os.path.join(SEGMENTS_DIR, f"segment_{i}_revback.wav")
+        reverse_segment_file(segpath, revback_path)  # reversing the reversed segment gives original orientation
+        ok2, txt2 = transcribe_audio_file(revback_path)
+        if ok2 and txt2.strip() != "<unintelligible>":
+            log(f"Transcription revback-seg #{i}: {txt2}")
+        else:
+            log(f"Revback seg #{i} transcription failed / unintelligible.")
+    window['-STATUS-'].update('Idle')
+
+# Main loop
+while True:
+    event, values = window.read(timeout=100)
+    if event == sg.WIN_CLOSED or event == 'Exit':
+        break
+
+    if event == '-REC-':
+        try:
+            recorder.start()
+            window['-REC-'].update(disabled=True)
+            window['-STOP-'].update(disabled=False)
+            window['-STATUS-'].update('Recording...')
+            log("Started recording. Press Stop when done.")
+        except Exception as e:
+            log("Error starting recording: " + str(e))
+            window['-STATUS-'].update('Idle')
+
+    if event == '-STOP-':
+        try:
+            recorder.stop()
+            window['-REC-'].update(disabled=False)
+            window['-STOP-'].update(disabled=True)
+            window['-STATUS-'].update('Saved recording.')
+            log(f"Saved {recorder.filename}")
+        except Exception as e:
+            log("Error stopping recording: " + str(e))
+            window['-STATUS-'].update('Idle')
+
+    if event == '-MAKE_REV-':
+        if not os.path.exists(RECORD_FILENAME):
+            log("No recording found. Record first.")
+            continue
+        try:
+            reverse_wav(RECORD_FILENAME, REVERSED_FILENAME)
+            log(f"Created reversed file: {REVERSED_FILENAME}")
+        except Exception as e:
+            log("Reverse failed: " + str(e))
+
+    if event == '-PLAY_ORIG-':
+        if not os.path.exists(RECORD_FILENAME):
+            log("No original file found.")
+            continue
+        do_play(RECORD_FILENAME, "original")
+
+    if event == '-PLAY_REV-':
+        if not os.path.exists(REVERSED_FILENAME):
+            log("No reversed file found. Create reversed first.")
+            continue
+        do_play(REVERSED_FILENAME, "reversed")
+
+    if event == '-TRANS_REV-':
+        if not os.path.exists(REVERSED_FILENAME):
+            log("No reversed file found; create reversed first.")
+            continue
+        do_transcribe(REVERSED_FILENAME, "reversed full")
+
+    if event == '-SEG_TRANS-':
+        if not os.path.exists(REVERSED_FILENAME):
+            log("No reversed file found; create reversed first.")
+            continue
+        sil_thresh = int(values['-SIL_THRESH-'])
+        min_sil = int(values['-MIN_SIL-'])
+        do_segment_transcribe(REVERSED_FILENAME, sil_thresh, min_sil)
+
+    if event == 'Clear Log':
+        window['-LOG-'].update('')
+
+window.close()
